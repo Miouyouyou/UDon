@@ -9,6 +9,13 @@ using System.IO;
 // System.Runtime.Serialization -> Used to save the app basic credentials ( /v1/api/apps )
 // System.IO                    -> Idem 
 using UnityEngine.UI;
+using NUnit.Framework.Internal.Commands;
+using System.Configuration;
+using System.Runtime.Serialization.Formatters;
+using System.Security.Cryptography.X509Certificates;
+using UnityEditor;
+using UnityEditor.VersionControl;
+using System.Runtime.Remoting.Messaging;
 
 [Serializable]
 public class TootAccount {
@@ -314,7 +321,7 @@ public class MyySaveHelpers {
 		BinaryFormatter bf = new BinaryFormatter();
 		FileStream file = File.Open(
 			rel_abs_from_app_path(filename),
-			FileMode.OpenOrCreate
+			System.IO.FileMode.OpenOrCreate
 		);
 		bf.Serialize(file, obj);
 		file.Close();
@@ -326,7 +333,8 @@ public class MyySaveHelpers {
 		T creds = default(T);
 		if (File.Exists(abs_file_path)) {
 			BinaryFormatter bf = new BinaryFormatter();
-			FileStream file = File.Open(abs_file_path, FileMode.Open);
+			FileStream file = 
+				File.Open(abs_file_path, System.IO.FileMode.Open);
 			creds = (T) bf.Deserialize(file);
 			file.Close();
 
@@ -376,6 +384,258 @@ public class TootUserAppCreds {
 	}
 }
 
+public class MyyUtilities {
+	private static byte[] string_to_bytes(string data) {
+		return System.Text.Encoding.UTF8.GetBytes(data);
+	}
+		
+	public static UnityWebRequest PreparePostRequestTo
+	(string endpoint_uri, string content, string content_type)
+	{
+		UnityWebRequest req = new UnityWebRequest(
+			endpoint_uri,
+			"POST",
+			new DownloadHandlerBuffer(),
+			new UploadHandlerRaw(string_to_bytes(content))
+		);
+		req.SetRequestHeader("Content-Type", content_type);
+		return req;
+	}
+
+	public static UnityWebRequest PrepareJsonPostRequestTo
+	(string endpoint_uri, object object_to_convert)
+	{
+		return PreparePostRequestTo(
+			endpoint_uri,
+			JsonUtility.ToJson(object_to_convert, false),
+			"application/json"
+		);
+	}
+
+	public static string StringFromBytes(byte[] data) {
+		return System.Text.Encoding.UTF8.GetString(data);
+	}
+
+}
+
+public class MyyUDonServerCredentials
+{
+	/* The application-specific credentials, irrelevant of the user
+	 * 
+	 * The app must be known to the server before it can be used by anything.
+	 * When the 'application' is registered to the server, it receives specific tokens
+	 * that must be used to authenticate the user afterwards.
+	 */
+	public TootAppAuthCreds app_creds = null;
+
+	/* The per-user per-server credentials.
+	 * 
+	 * The user must authenticate itself to the server before issuing any command.
+	 */
+	public TootUserAppCreds user_creds = null;
+
+	public bool IsTheAppRegistered() {
+		return app_creds != null;
+	}
+
+	public bool IsTheUserAuthenticated() {
+		return user_creds != null;
+	}
+
+	public bool CanRead() {
+		return user_creds.scope.Contains("read");
+	}
+
+	public bool CanWrite() {
+		return user_creds.scope.Contains("write");
+	}
+
+	public bool CanFollow() {
+		return user_creds.scope.Contains("follow");
+	}
+}
+	
+public class MyyUDonClient {
+
+	/** 
+	 * This wonderful moment where you discover that Coroutines are executed
+	 * through the main UI thread...
+	 * 
+	 * Yep... The thing is :
+	 * - When doing an operation, you'll have to know the result. If you
+	 *   authenticate :
+	 *    * you'll want to do something if everything went fine,
+	 *    * and do something else if something went wrong !
+	 * - Every function will use UnityWebRequest to send HTTP requests.
+	 * 
+	 * UnityWebRequest#Send() is an AsyncOperation, meaning that the
+	 * operation will return and do it's job in background.
+	 * 
+	 *  
+	 * Now, if you do :
+	 *   UnityWebRequest request = // preparation code...
+	 *   AsyncOperation op = request.Send();
+	 *   while (!op.isDone);
+	 * 
+	 * This will block the Coroutines. If you execute the Coroutine from
+	 * the main UI thread, THIS WILL BLOCK THE MAIN UI THREAD !
+	 * 
+	 * However, if do 'yield return request.Send()', things will go 
+	 * smoothly. Now, that only works if the calling function has a 
+	 * Coroutines signature...
+	 * 
+	 * So, in order to coerce Coroutines signatures, performance yielding
+	 * and status communication, I opted for a callback system. This fits
+	 * well with the Async operations pattern, and is clean.
+	 * 
+	 * This is how most of the JavaScript libraries work, anyway.
+	 */
+	public delegate void ClientCallback(bool status, string message);
+
+	private static TootAppAuthInfos app_infos = new TootAppAuthInfos();
+	private MyyUDonServerCredentials credentials = new MyyUDonServerCredentials();
+	private string setup_server_domain = "";
+	private string api_endpoint_base = "";
+
+	private string endpoint(string name) {
+		return api_endpoint_base + name;
+	}
+
+	private static bool has_request_succeeded
+	(UnityWebRequest request)
+	{
+		return (!request.isError && request.responseCode < 400);
+	}
+
+	public IEnumerator RegisterAppTo
+	(string server_domain, ClientCallback callback)
+	{
+		setup_server_domain = server_domain;
+		api_endpoint_base = "https://" + server_domain + "/api/v1/";
+
+		Debug.Log("Registering the application to : " + endpoint("apps"));
+		UnityWebRequest app_reg_req = MyyUtilities.PrepareJsonPostRequestTo(
+			endpoint("apps"), app_infos
+		);
+
+		/* ... Switching to IEnumerator + callbacks might be the best
+		 * way after all. Waiting manually for Async Operation to end
+		 * is not the way to go, IMHO */
+		// FIXME : Pretty sure that it's NOT the way to do it.
+		yield return app_reg_req.Send();
+
+		Debug.Log(MyyUtilities.StringFromBytes(app_reg_req.uploadHandler.data));
+		Debug.Log(app_reg_req.responseCode);
+
+		bool status = has_request_succeeded(app_reg_req);
+		string message = "";
+
+		if (status) {
+			message = app_reg_req.downloadHandler.text;
+			Debug.Log(message);
+			credentials.app_creds = 
+				JsonUtility.FromJson<TootAppAuthCreds>(message);
+			Debug.Log("Application registered.\n" + credentials.app_creds.ToString());
+		}
+		else {
+			message = app_reg_req.error;
+		}
+
+		if (callback != null)
+			callback(status, message);
+	}
+
+	public IEnumerator LoginTo
+	(string server_domain, string login, string password,
+	 ClientCallback callback)
+	{
+
+		if (!credentials.IsTheAppRegistered()) {
+			yield return RegisterAppTo(server_domain, null);
+			if (!credentials.IsTheAppRegistered()) {
+				Debug.Log("Could not register the application (´・ω・｀)");
+				yield return null;
+			}
+		}
+
+		// TODO : The scope MUST be user defined
+		string app_user_auth_string = string.Format(
+			"client_id={0}&client_secret={1}" +
+			"&grant_type=password&scope=read write follow&username={2}&password={3}",
+			credentials.app_creds.client_id,
+			credentials.app_creds.client_secret,
+			login, password
+		);
+
+		UnityWebRequest user_auth_req = MyyUtilities.PreparePostRequestTo(
+			"https://" + server_domain + "/oauth/token",
+			app_user_auth_string,
+			"application/x-www-form-urlencoded"
+		);
+			
+		yield return user_auth_req.Send();
+
+		bool status = has_request_succeeded(user_auth_req);
+		string message = user_auth_req.downloadHandler.text;
+
+		if (status) {
+			Debug.Log(message);
+
+			credentials.user_creds = 
+				JsonUtility.FromJson<TootUserAppCreds>(message);
+			Debug.Log(" Authentication OK ! We're good to go !");
+		}
+		else {
+			Debug.Log("Authentication failed (´・ω・｀)・・・");
+			Debug.Log(message);
+		}
+
+		if (callback != null)
+			callback(status, message);
+
+	}
+
+
+	/* BLOCKING CALL */
+	public IEnumerator api_write
+	(string endpoint_uri, object toot_object_to_send,
+     ClientCallback callback)
+	{
+		UnityWebRequest mastodon_api_req = MyyUtilities.PrepareJsonPostRequestTo(
+			endpoint_uri, toot_object_to_send
+		);
+		// TODO : No need to recreate the SAME header EVERY time.
+		mastodon_api_req.SetRequestHeader(
+			"Authorization",
+			String.Format("Bearer {0}", credentials.user_creds.access_token)
+		);
+
+		yield return mastodon_api_req.Send();
+
+		bool status = 
+			(mastodon_api_req.isError || mastodon_api_req.responseCode >= 400);
+		string message =
+			mastodon_api_req.downloadHandler.text;
+
+		Debug.LogFormat(
+			"Was able to send {0} ? {1} !", toot_object_to_send.GetType(), status
+		);
+		Debug.LogFormat(
+			"Response : {0}\n", message
+		);
+
+		if (callback != null)
+			callback(status, message);
+	}
+
+	public IEnumerator Toot(string message, ClientCallback callback)
+	{
+		TootStatusToSend toot = new TootStatusToSend(message);
+		yield return api_write(endpoint("statuses"), toot, callback);
+	}
+
+}
+
 public class TooTooT : MonoBehaviour {
 
 	public Canvas login_pane;
@@ -385,195 +645,38 @@ public class TooTooT : MonoBehaviour {
 	public InputField password;
 
 	public InputField typed_toot;
+	public Button send_toot_button;
 	public Text displayed_toots;
 
-	private TootAppAuthCreds app_creds = null;
-	private TootUserAppCreds app_user_creds = null;
+	private MyyUDonClient udon_client;
 
-	private static byte[] string_to_bytes(string data) {
-		return System.Text.Encoding.UTF8.GetBytes(data);
-	}
-
-	private static IEnumerator post_as_json_with_auth
-	(string endpoint_uri, object toot_object_to_send, TootUserAppCreds user_creds)
+	private void start_chatting()
 	{
-		string jsonsed_toot_object = JsonUtility.ToJson(toot_object_to_send);
-		UnityWebRequest mastodon_api_req = new UnityWebRequest(
-			endpoint_uri, 
-			"POST",
-			new DownloadHandlerBuffer(),
-			new UploadHandlerRaw(string_to_bytes(jsonsed_toot_object))
-		);
-		mastodon_api_req.SetRequestHeader("Content-Type", "application/json");
-		mastodon_api_req.SetRequestHeader(
-			"Authorization",
-			String.Format("Bearer {0}", user_creds.access_token)
-		);
-
-		yield return mastodon_api_req.Send();
-
-		if (mastodon_api_req.isError && mastodon_api_req.responseCode >= 400) {
-			// This should call a Lambda or Delegate or whatever in the future
-			Debug.LogFormat(
-				"(´・ω・｀)・・・失敗\nJSON Message was :\n{0}",
-				jsonsed_toot_object
-			);
-		}
-		else {
-			// Same here
-			Debug.LogFormat("Sending a {0} : Success !", toot_object_to_send.GetType());
-			Debug.LogFormat("Response : {0}\n", mastodon_api_req.downloadHandler.text);
-		}
+		login_pane.gameObject.SetActive(false);
+		chat_pane.gameObject.SetActive(true);
 	}
 
-	private void start_chatting() {
-		login_pane.enabled = false;
-		chat_pane.enabled = true;
+	protected void on_login_cb
+	(bool logged_in, string error_message)
+	{
+		if (logged_in) start_chatting();
 	}
 
-	private bool can_load_valid_user_app_creds() {
-		app_user_creds = 
-			MyySaveHelpers.LoadFromFile<TootUserAppCreds>("udon_app_user_creds.dat");
-		return app_user_creds != null;
+	protected void on_toot_sent_cb
+	(bool sent_correctly, string error_message)
+	{
+		if (sent_correctly)
+			typed_toot.text = "";
+		send_toot_button.enabled = true;
 	}
 
 	// Use this for initialization
 	void Start () {
-		//StartCoroutine(GetText());
-
-		if (can_load_valid_user_app_creds()) start_chatting();
-		else {
-			app_creds = MyySaveHelpers.LoadFromFile<TootAppAuthCreds>("udon_app_creds.dat");
-			if (app_creds == null)
-				StartCoroutine(GetGlobalAppCredentials());
-		}
+		udon_client = new MyyUDonClient();
 	}
 
-	IEnumerator GetText() {
-		UnityWebRequest req = UnityWebRequest.Get("https://friends.nico/api/v1/instance");
-
-		yield return req.Send();
-
-		if(req.isError) {
-			Debug.Log(req.error);
-		}
-		else {
-			string result_text = req.downloadHandler.text;
-			// Show results as text
-			Debug.Log(result_text);
-
-			// Or retrieve results as binary data
-			byte[] results = req.downloadHandler.data;
-
-			Debug.LogFormat("Results length : {0}\n", results.Length);
-			TootInstance instance = JsonUtility.FromJson<TootInstance>(result_text);
-
-			Debug.Log(instance.ToString());
-		}
-	}
-
-	IEnumerator GetGlobalAppCredentials() {
+	public void TryToLogin() {
 		
-		TootAppAuthInfos app_infos = new TootAppAuthInfos();
-		string app_req_json_data = JsonUtility.ToJson(app_infos, false);
-
-		Debug.Log(app_req_json_data);
-
-		// Voodoo programming : Copy pasted this from 
-		// https://qiita.com/mattak/items/d01926bc57f8ab1f569a
-		// However, I have no idea why he uses a UploadHandlerRaw
-		// AND a DownloadHandlerBuffer (and not any other) ...
-		UnityWebRequest auth_req = new UnityWebRequest(
-			"https://friends.nico/api/v1/apps",
-			"POST",
-			new DownloadHandlerBuffer(),
-			new UploadHandlerRaw(string_to_bytes(app_req_json_data))
-		);
-		auth_req.SetRequestHeader("Content-Type", "application/json");
-
-		yield return auth_req.Send();
-
-		if (auth_req.isError) {	Debug.Log(auth_req.error); }
-		else {
-			string result_text = auth_req.downloadHandler.text;
-			app_creds = JsonUtility.FromJson<TootAppAuthCreds>(result_text);
-			MyySaveHelpers.SaveInFile("udon_app_creds.dat", app_creds);
-		}
-
-	}
-
-	IEnumerator GetUserAppCredentials(string login, string password) {
-		string request_string = String.Format(
-			"client_id={0}&client_secret={1}" +
-			"&grant_type=password&scope=write&username={2}&password={3}",
-			app_creds.client_id, app_creds.client_secret, login, password
-		);
-
-		Debug.Log(request_string);
-
-		/* Okay ! Okay ! ... Okay...
-		   This *NEEDS* to be documented.
-		   
-		   If you use UnityWebRequest.Post, the string will automatically be
-		   passed through an HTML special characters mangler that will mangle
-		   the authenticating string, failing  the authentication.
-		   
-		   If you use new
-		   UnityWebRequest(
-		     url, "POST", DownloadHandlerBuffer, UploadHandlerRaw
-		   ),
-		   the string won't get mangled BUT the Content-Type won't be set
-		   and this will also fail the authentication.
-
-		   So, basically, you need BOTH new UnityWebRequest with a Raw
-		   Uploader, converting your authenticating string into a byte array
-		   AND
-		   Setup the Content-Type to applicatino/x-www-form-urlencoded.
-
-		   Lost 1 hour because of this !
-		   
-		   That reminds me that debugging HTTP issue without a server at
-		   hand is extremely difficult, and finding a way to run a quick web
-		   server on Windows is stupidly hard. I'll need to know how to
-		   sniff SSL content coming from my own machine with Wireshark.
-
-		   If you want to debug similar issues, do NOT change the URL to
-		   something other than an address of a peripheral that you
-		   *entirely* own. Remember that you're passing all your credentials
-		   in the strings. Anyone catching that has a free access to your
-		   account.
-		 */
-		UnityWebRequest user_app_auth_req = new UnityWebRequest(
-			"https://friends.nico/oauth/token", 
-			"POST",
-			new DownloadHandlerBuffer(),
-			new UploadHandlerRaw(string_to_bytes(request_string))
-		);
-
-		user_app_auth_req.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-		yield return user_app_auth_req.Send();
-
-		if (user_app_auth_req.isError || user_app_auth_req.responseCode >= 400) {
-			Debug.Log("(´・ω・｀)・・・失敗");
-			Debug.Log(user_app_auth_req.downloadHandler.text);
-		}
-		else {
-			string returned_user_app_creds = user_app_auth_req.downloadHandler.text;
-			Debug.Log(returned_user_app_creds);
-			Debug.Log(user_app_auth_req.responseCode);
-
-			app_user_creds = JsonUtility.FromJson<TootUserAppCreds>(returned_user_app_creds);
-			Debug.Log(app_user_creds.ToString());
-			MyySaveHelpers.SaveInFile("udon_app_user_creds.dat", app_user_creds);
-			start_chatting();
-		}
-	}
-
-	// Update is called once per frame
-	void Update () {
-	}
-
-	public void nya() {
 		Debug.LogFormat(
 			"Server   : {0}\n" +
 			"Login    : {1}\n" +
@@ -582,21 +685,17 @@ public class TooTooT : MonoBehaviour {
 			login.text,
 			password.text != null && password.text != ""
 		);
-		StartCoroutine(GetUserAppCredentials(login.text, password.text));
+		StartCoroutine(
+			udon_client.LoginTo(
+				server.text, login.text, password.text, on_login_cb
+			)
+		);
 	}
 
-	public void sendToot() {
-		// A 'toot' is actually a Status...
-		// So that could be read : TootTootToSend
-		// -- Useless comment
-		TootStatusToSend toot = new TootStatusToSend(typed_toot.text);
-
+	public void SendToot() {
+		send_toot_button.enabled = false;
 		StartCoroutine(
-			post_as_json_with_auth(
-				"https://friends.nico/api/v1/statuses",
-				toot,
-				app_user_creds
-			)
+			udon_client.Toot(typed_toot.text, on_toot_sent_cb)
 		);
 	}
 }
