@@ -5,9 +5,6 @@ using UnityEngine;
 using UnityEngine.Networking;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.IO;
-
-// System.Runtime.Serialization -> Used to save the app basic credentials ( /v1/api/apps )
-// System.IO                    -> Idem 
 using UnityEngine.UI;
 using NUnit.Framework.Internal.Commands;
 using System.Configuration;
@@ -16,47 +13,60 @@ using System.Security.Cryptography.X509Certificates;
 using UnityEditor;
 using UnityEditor.VersionControl;
 using System.Runtime.Remoting.Messaging;
+using System.Security.Cryptography;
+using UnityEditor.Sprites;
+using NUnit.Framework.Constraints;
+
+
+
+// System.Runtime.Serialization -> Used to save the app basic credentials ( /v1/api/apps )
+// System.IO                    -> Idem 
+using System.Text;
 
 [Serializable]
 public class TootAccount {
-	// The ID of the account (Not Null)
+	/// The ID of the account (Not Null)
 	public long id;
-	// The Username of the account (Not Null)
+	/// The Username of the account (Not Null)
 	public string username;
-	// Equals username for local users, includes @domain for remote ones (Not Null)
+	/// Equals username for local users, includes @domain for remote ones (Not Null)
 	public string acct;
-	// The account's display name (Not Null)
+	/// The account's display name (Not Null)
 	public string display_name;
-	// Boolean for when the account cannot be followed without waiting for approval first (Not Null)
+	/// Boolean for when the account cannot be followed without waiting for approval first (Not Null)
 	public bool locked;
-	// The time the account was created (Not Null)
-	public long created_at;
-	// The number of followers for the account (Not Null)
+	/// The time the account was created (Not Null)
+	public string created_at;
+	/// The number of followers for the account (Not Null)
 	public long followers_count;
-	// The number of accounts the given account is following (Not Null)
+	/// The number of accounts the given account is following (Not Null)
 	public long following_count;
-	// The number of statuses the account has made (Not Null)
+	/// The number of statuses the account has made (Not Null)
 	public long statuses_count;
-	// Biography of user (Not Null)
+	/// Biography of user (Not Null)
 	public string note;
-	// URL of the user's profile page (can be remote) (Not Null)
+	/// URL of the user's profile page (can be remote) (Not Null)
 	public string url;
-	// URL to the avatar image (Not Null)
+	/// URL to the avatar image (Not Null)
 	public string avatar;
-	// URL to the avatar static image (gif) (Not Null)
+	/// URL to the avatar static image (gif) (Not Null)
 	public string avatar_static;
-	// URL to the header image (Not Null)
+	/// URL to the header image (Not Null)
 	public string header;
-	//	URL to the header static image (gif)
+	///	URL to the header static image (gif)
 	public string header_static;
 }
 
 [Serializable]
 public class TootApplication {
-	// Name of the app (Not Null)
+	/// Name of the app (Not Null)
 	public string name;
-	// Homepage URL of the app ( ! Can be null ! )
+	/// Homepage URL of the app ( ! Can be null ! )
 	public string website;
+
+	override public string ToString() {
+		return "name :" + name + "\nwebsite : " + website;
+	}
 }
 
 [Serializable]
@@ -164,7 +174,7 @@ public class TootNotification {
 	// One of: "mention", "reblog", "favourite", "follow" (Not Null)
 	public string type;
 	// The time the notification was created (Not Null)
-	public long created_at;
+	public string created_at;
 	// The Account sending the notification to the user (Not Null)
 	public TootAccount account;
 	// The Status associated with the notification, if applicable ( ! Can be null ! )
@@ -218,7 +228,7 @@ public class TootStatus {
 	// URL to the status page (can be remote) (Not Null)
 	public string url;
 	// The Account which posted the status (Not Null)
-	public string account;
+	public TootAccount account;
 	// null or the ID of the status it replies to ( ! Can be null ! )
 	public Nullable<long> in_reply_to_id;
 	// null or the ID of the account it replies to ( ! Can be null ! )
@@ -228,7 +238,7 @@ public class TootStatus {
 	// Body of the status; this will contain HTML (remote HTML already sanitized) (Not Null)
 	public string content;
 	// The time the status was created (Not Null)
-	public long created_at;
+	public string created_at;
 	// The number of reblogs for the status (Not Null)
 	public long reblogs_count;
 	// The number of favourites for the status (Not Null)
@@ -253,6 +263,10 @@ public class TootStatus {
 	public TootApplication application;
 	// The detected language for the status (default: en) (Not Null)
 	public string language;
+
+	override public string ToString() {
+		return String.Format("<{0}> {1}", account.display_name, content);
+	}
 }
 
 [Serializable]
@@ -368,7 +382,7 @@ public class TootUserAppCreds {
 	public string access_token;
 	public string token_type;
 	public string scope;
-	public long created_at;
+	public string created_at;
 
 	override public string ToString() {
 		return String.Format(
@@ -385,7 +399,7 @@ public class TootUserAppCreds {
 }
 
 public class MyyUtilities {
-	private static byte[] string_to_bytes(string data) {
+	public static byte[] StringToBytes(string data) {
 		return System.Text.Encoding.UTF8.GetBytes(data);
 	}
 		
@@ -396,7 +410,7 @@ public class MyyUtilities {
 			endpoint_uri,
 			"POST",
 			new DownloadHandlerBuffer(),
-			new UploadHandlerRaw(string_to_bytes(content))
+			new UploadHandlerRaw(StringToBytes(content))
 		);
 		req.SetRequestHeader("Content-Type", content_type);
 		return req;
@@ -416,6 +430,13 @@ public class MyyUtilities {
 		return System.Text.Encoding.UTF8.GetString(data);
 	}
 
+	public static string StringFromBytesRange
+	(byte[] data, int start, int n_bytes_from_start)
+	{
+		return System.Text.Encoding.UTF8.GetString(
+			data, start, n_bytes_from_start
+		);
+	}
 }
 
 public class MyyUDonServerCredentials
@@ -454,11 +475,111 @@ public class MyyUDonServerCredentials
 		return user_creds.scope.Contains("follow");
 	}
 }
-	
+
+public class MyyDownloadHandler : DownloadHandlerScript {
+
+	private bool previous_event_unfinished = false;
+	private StringBuilder previous_unfinished_event_data = new StringBuilder(8192);
+
+	public TootEventParser.got_toot_callback toot_callback;
+
+	// Standard scripted download handler - allocates memory on each ReceiveData callback
+	public MyyDownloadHandler
+	(TootEventParser.got_toot_callback callback): base()
+	{
+		toot_callback = callback;
+	}
+
+	// Pre-allocated scripted download handler
+	// reuses the supplied byte array to deliver data.
+	// Eliminates memory allocation.
+
+	public MyyDownloadHandler
+	(TootEventParser.got_toot_callback callback, byte[] buffer): base(buffer)
+	{
+		toot_callback = callback;
+	}
+
+	// Required by DownloadHandler base class. Called when you address the 'bytes' property.
+
+	protected override byte[] GetData() { return null; }
+
+	// Called once per frame when data has been received from the network.
+
+	protected override bool ReceiveData(byte[] data, int dataLength) {
+		
+		var data_string = MyyUtilities.StringFromBytesRange(data, 0, dataLength);
+		var events_data = TootEventParser.split_events(data_string);
+
+		int already_parsed_events = 0;
+
+		if (previous_event_unfinished) {
+			previous_unfinished_event_data.Append(events_data[0]);
+			
+			if (TootEventParser.at_least_one_complete_event_in(events_data)) {
+				// That means that the first event is AT LEAST completed.
+				// We expect that first event to complete the previously
+				// unfinished event...
+
+				TootEventParser.parse_toot_in_event_data(
+					previous_unfinished_event_data.ToString(), toot_callback
+				);
+
+				// Start to 'parse_toots_from' 1 after that
+				already_parsed_events = 1;
+
+				// All events completed for now
+				previous_event_unfinished = false;
+				previous_unfinished_event_data.Length = 0;
+			}
+		}
+
+		// In the case that there's only one unfinished event, nothing will be parsed
+		TootEventParser.parse_toots_from(
+			events_data, toot_callback, already_parsed_events
+		);
+
+		/* Case 1 : 
+		 * - The previous event was already unfinished
+		 *   In this case
+		 *   - if the current data completed this event
+		 *     then that event is now processed.
+		 *   - if the current data did not complete this event
+		 *     then there were only one 'event' string and that
+		 *          string was appended to the unfinished event
+		 * Case 2 :
+		 * - All previous events are completed and there's an unfinished
+		 *   event in the downloaded data
+		 *   Then this unfinished event data is currently not processed !
+		 */ 
+		if (TootEventParser.last_event_unfinished(events_data) &&
+			!previous_event_unfinished)
+		{
+			previous_event_unfinished = true;
+			previous_unfinished_event_data.Append(events_data[events_data.Length-1]);
+		}
+			
+
+		return true;
+	}
+
+	// Called when all data has been received from the server and delivered via ReceiveData.
+
+	protected override void CompleteContent() {
+		Debug.Log("LoggingDownloadHandler :: CompleteContent - DOWNLOAD COMPLETE!");
+	}
+
+	// Called when a Content-Length header is received from the server.
+
+	protected override void ReceiveContentLength(int contentLength) {
+		Debug.Log(string.Format("LoggingDownloadHandler :: ReceiveContentLength - length {0}", contentLength));
+	}
+}
+
 public class MyyUDonClient {
 
-	/** 
-	 * This wonderful moment where you discover that Coroutines are executed
+	/**
+	 * This wonderful moment when you discover that Coroutines are executed
 	 * through the main UI thread...
 	 * 
 	 * Yep... The thing is :
@@ -492,7 +613,7 @@ public class MyyUDonClient {
 	 */
 	public delegate void ClientCallback(bool status, string message);
 
-	private static TootAppAuthInfos app_infos = new TootAppAuthInfos();
+	private static TootAppAuthInfos app_infos    = new TootAppAuthInfos();
 	private MyyUDonServerCredentials credentials = new MyyUDonServerCredentials();
 	private string setup_server_domain = "";
 	private string api_endpoint_base = "";
@@ -572,11 +693,13 @@ public class MyyUDonClient {
 			app_user_auth_string,
 			"application/x-www-form-urlencoded"
 		);
-			
+
 		yield return user_auth_req.Send();
 
 		bool status = has_request_succeeded(user_auth_req);
 		string message = user_auth_req.downloadHandler.text;
+
+		Debug.Log(message);
 
 		if (status) {
 			Debug.Log(message);
@@ -628,6 +751,28 @@ public class MyyUDonClient {
 			callback(status, message);
 	}
 
+	public IEnumerator stream(TootEventParser.got_toot_callback callback) {
+		UnityWebRequest mastodon_api_req = new UnityWebRequest(
+			endpoint("streaming/public/local"),
+			"GET"
+		);
+
+		mastodon_api_req.downloadHandler =
+			new MyyDownloadHandler(callback, new byte[8192]);
+		mastodon_api_req.SetRequestHeader(
+			"Authorization",
+			String.Format("Bearer {0}", credentials.user_creds.access_token)
+		);
+
+		yield return mastodon_api_req.Send();
+	}
+
+	/// <summary>
+	/// Toot the specified message and call callback.
+	/// </summary>
+	/// <param name="message">Message.</param>
+	/// <param name="callback">Callback.</param>
+
 	public IEnumerator Toot(string message, ClientCallback callback)
 	{
 		TootStatusToSend toot = new TootStatusToSend(message);
@@ -654,6 +799,7 @@ public class TooTooT : MonoBehaviour {
 	{
 		login_pane.gameObject.SetActive(false);
 		chat_pane.gameObject.SetActive(true);
+		StartCoroutine(udon_client.stream(received_toot_from_stream_cb));
 	}
 
 	protected void on_login_cb
@@ -670,9 +816,16 @@ public class TooTooT : MonoBehaviour {
 		send_toot_button.enabled = true;
 	}
 
+	protected void received_toot_from_stream_cb
+	(TootStatus toot)
+	{
+		displayed_toots.text += (toot.account.display_name + ": " + toot.content + "\n");
+	}
+
 	// Use this for initialization
 	void Start () {
 		udon_client = new MyyUDonClient();
+
 	}
 
 	public void TryToLogin() {
@@ -699,3 +852,4 @@ public class TooTooT : MonoBehaviour {
 		);
 	}
 }
+
